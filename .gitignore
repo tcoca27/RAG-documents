@@ -1,0 +1,6 @@
+.venv
+__pycache__
+db
+lancedb
+uploaded_files
+docker-compose.yml

@@ -1,0 +1,14 @@
+pandas
+pyarrow
+lancedb
+sentence-transformers
+uvicorn
+fastapi
+streamlit
+ollama
+llama-index
+llama-index-vector-stores-lancedb
+aiofiles
+llama-index-llms-ollama
+llama-index-embeddings-ollama
+PyPDF2
