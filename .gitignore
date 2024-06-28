@@ -3,4 +3,3 @@ __pycache__
 db
 lancedb
 uploaded_files
-docker-compose.yml

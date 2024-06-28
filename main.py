@@ -20,11 +20,13 @@ import pyarrow as pa
 
 app = FastAPI()
 
-main_llm = Ollama(model="llama3", request_timeout=120.0)
-summarizer_llm = Ollama(model="llama3",  request_timeout=120.0)
-rewriter_llm = Ollama(model="llama3",  request_timeout=120.0)
-generalist_llm = Ollama(model="llama3",  request_timeout=120.0)
-embed_model = OllamaEmbedding(model_name="nomic-embed-text")
+OLLAMA_BASE = os.getenv('OLLAMA_BASE', 'http://localhost:11434')
+
+main_llm = Ollama(base_url=OLLAMA_BASE,model="llama3", request_timeout=120.0)
+summarizer_llm = Ollama(base_url=OLLAMA_BASE,model="llama3",  request_timeout=120.0)
+rewriter_llm = Ollama(base_url=OLLAMA_BASE,model="llama3",  request_timeout=120.0)
+generalist_llm = Ollama(base_url=OLLAMA_BASE,model="llama3",  request_timeout=120.0)
+embed_model = OllamaEmbedding(base_url=OLLAMA_BASE,model_name="nomic-embed-text")
 
 class Document(LanceModel):
     vector: Vector(768)
@@ -34,7 +36,7 @@ class Document(LanceModel):
 reranker = lancedb.rerankers.ColbertReranker()
 db = lancedb.connect("./lancedb")
 table = db.create_table("carry1st", schema=Document, mode="overwrite")
-vector_store = LanceDBVectorStore(uri="./lancedb", table=table)
+vector_store = LanceDBVectorStore(uri="./lancedb", table=table, query_type="hybrid", reranker=reranker)
 # vector_store._add_reranker(reranker)
 
 UPLOAD_DIR = "uploaded_files"
@@ -89,7 +91,6 @@ def is_valid_file(file: UploadFile) -> bool:
 @app.get("/upload", response_model=List[str])
 async def uploaded_files():
     files = os.listdir(UPLOAD_DIR)
-    print(files)
     return files
 
 @app.post("/upload")
@@ -141,14 +142,13 @@ def retrieve_and_synthesize(query: str, top_k: int = 3) -> tuple:
     query_engine = index.as_query_engine(similarity_top_k=top_k)
     results = query_engine.retrieve(query)
     res_rerank = reranker.rerank_fts(query=query, fts_results=pa.table([pa.array([r.text for r in results]), pa.array([r.score for r in results]), pa.array([i for i in range(len(results))])], names=['text', 'score', 'index'])).to_pandas()
-    filtered_results = []
+    sources = []
     for _, row in res_rerank.iterrows():
         original_index = row['index']
-        if row['relevance_score'] < constants.SOURCE_THRESHOLD:
-            filtered_results.append(results[original_index].text)
-    retrieved_info = "\n".join(filtered_results)
+        if row['_relevance_score'] > constants.SOURCE_THRESHOLD:
+            sources.append(DocumentsResponse(text=results[original_index].text, source_name=results[original_index].metadata['file_name'], source_path=results[original_index].metadata['file_path'], page=results[original_index].metadata.get('page_label')))
+    retrieved_info = "\n".join(res_rerank[res_rerank['_relevance_score'] > constants.SOURCE_THRESHOLD]['text'].tolist())
     synthesized = main_llm.complete(constants.RETRIEVE_SYNTHESIZE_PROMPT.format(query=query, retrieved_info=retrieved_info, company_name=constants.COMPANY_NAME))
-    sources = [DocumentsResponse(text=node.text, source_name=node.metadata['file_name'], source_path=node.metadata['file_path'], page=node.metadata.get('page_label')) for node in results if node.score > constants.SOURCE_THRESHOLD]
     return synthesized.text, sources
 
 @app.post("/chat", response_model=ChatResponse)
@@ -156,18 +156,29 @@ async def chat(request: ChatRequest):
     query = request.message
     chat_history = chat_memory.get_all()
     
+    if query.startswith("/summarize"):
+        response = summarize(query[11:])
+        if "generalist" in response:
+            response = generalist(query[11:])
+    elif query.startswith("/rewrite"):
+        response = rewrite(query[8:])
+        if "generalist" in response:
+            response = generalist(query[8:])
+    elif query.startswith("/retrieve"):
+        response, sources = retrieve_and_synthesize(query[9:], request.top_k)
+    elif query.startswith("/generalist"):
+        response = generalist(query[12:])
+    
     tool_decision = main_llm.complete(constants.MAIN_PROMPT.format(chat_history=chat_history, query=query)).text.strip().lower()
     print(tool_decision)
     
     if "summarize" in tool_decision:
         response = summarize(query)
         if "generalist" in response:
-            print(response)
             response = generalist(query)
     elif "rewrite" in tool_decision:
         response = rewrite(query)
         if "generalist" in response:
-            print(response)
             response = generalist(query)
     elif "retrieve" in tool_decision:
         response, sources = retrieve_and_synthesize(query, request.top_k)
